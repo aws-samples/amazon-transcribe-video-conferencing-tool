@@ -1,0 +1,397 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Stack to deploy summarization resources
+Parameters:
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Parameters:  
+  NotebookBucket:
+    Type: String
+    Description: Enter the S3 bucket where notebook zip has been uploaded. 
+    Default: "cf-summ-notebook"
+  InputBucketName:
+    Description: name of the S3 bucket where inputs will be stored.
+    Type: String
+  OutputBucketName:
+    Description: name of the output bucket where video summaries will be stored.
+    Type: String
+  TranscriptBucketName:
+    Description: Name of the bucket where transcripts will be stored.
+    Type: String
+Resources:
+#network configurations
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.0.0/20
+      VpcId: !Ref VPC
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: security group for SageMaker notebook instance, training jobs and hosting endpoint
+      VpcId: !Ref VPC
+  SecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: '-1'
+      GroupId: !Ref SecurityGroup
+      SourceSecurityGroupId: !Ref SecurityGroup
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet
+  # IAM roles
+  InvokeTranscribeExecutionRole:
+     Type: AWS::IAM::Role
+     Properties:
+       AssumeRolePolicyDocument:
+         Statement:
+         - Action:
+           - sts:AssumeRole
+           Effect: Allow
+           Principal:
+             Service:
+             - lambda.amazonaws.com
+         Version: '2012-10-17'
+       Path: "/"
+       Policies:
+       - PolicyDocument:
+           Statement:
+           - Action:
+             - logs:CreateLogGroup
+             - logs:CreateLogStream
+             - logs:PutLogEvents
+             Effect: Allow
+             Resource: arn:aws:logs:*:*:*
+           Version: '2012-10-17'
+         PolicyName: !Sub ${AWS::StackName}-${AWS::Region}-AWSLambda-CW
+       - PolicyDocument:
+           Statement:
+           - Action:
+             - s3:GetObject
+             - s3:DeleteObject
+             - s3:PutObject
+             - s3:GetBucketNotification
+             - s3:PutBucketNotification
+             Effect: Allow
+             Resource:
+             - !Sub arn:aws:s3:::*
+             - !Sub arn:aws:s3:::*
+           Version: '2012-10-17'
+         PolicyName: !Sub ${AWS::StackName}-${AWS::Region}-AWSLambda-S3
+       - PolicyDocument:
+           Statement:
+           - Action:
+             - transcribe:StartTranscriptionJob
+             - transcribe:GetTranscriptionJob
+             Effect: Allow
+             Resource:
+             - "*"
+           Version: '2012-10-17'
+         PolicyName: !Sub ${AWS::StackName}-${AWS::Region}-AWSLambda-Transcribe
+       RoleName: !Sub ${AWS::StackName}-${AWS::Region}-InvokeTranscribeExecutionRole
+  SageMakerExecutionRole:
+     Type: AWS::IAM::Role
+     Properties:
+       AssumeRolePolicyDocument:
+         Statement:
+         - Action:
+           - sts:AssumeRole
+           Effect: Allow
+           Principal:
+             Service:
+             - lambda.amazonaws.com
+         Version: '2012-10-17'
+       Path: "/"
+       Policies:
+       - PolicyDocument:
+           Statement:
+           - Action:
+             - logs:CreateLogGroup
+             - logs:CreateLogStream
+             - logs:PutLogEvents
+             Effect: Allow
+             Resource: arn:aws:logs:*:*:*
+           Version: '2012-10-17'
+         PolicyName: !Sub ${AWS::StackName}-${AWS::Region}-AWSLambda-CW
+       - PolicyDocument:
+           Statement:
+           - Action:
+             - s3:GetObject
+             - s3:DeleteObject
+             - s3:PutObject
+             - s3:GetBucketNotification
+             - s3:PutBucketNotification
+             Effect: Allow
+             Resource:
+             - !Sub arn:aws:s3:::*
+             - !Sub arn:aws:s3:::*
+           Version: '2012-10-17'
+         PolicyName: !Sub ${AWS::StackName}-${AWS::Region}-AWSLambda-S3
+       - PolicyDocument:
+           Statement:
+           - Action:
+             - sagemaker:*
+             Effect: Allow
+             Resource:
+             - "*"
+           Version: '2012-10-17'
+         PolicyName: !Sub ${AWS::StackName}-${AWS::Region}-AWSLambda-SageMaker
+       RoleName: !Sub ${AWS::StackName}-${AWS::Region}-SageMakerExecutionRole 
+  SageMakerModelExecutionRole:
+     Type: AWS::IAM::Role
+     Properties:
+       AssumeRolePolicyDocument:
+         Statement:
+         - Action:
+           - sts:AssumeRole
+           Effect: Allow
+           Principal:
+             Service:
+             - sagemaker.amazonaws.com
+         Version: '2012-10-17'
+       Path: "/"
+       Policies:
+       - PolicyDocument:
+           Statement:
+           - Action:
+             - s3:GetObject
+             - s3:DeleteObject
+             - s3:PutObject
+             - s3:GetBucketNotification
+             - s3:PutBucketNotification
+             Effect: Allow
+             Resource:
+             - !Sub arn:aws:s3:::*
+             - !Sub arn:aws:s3:::*
+           Version: '2012-10-17'
+         PolicyName: !Sub ${AWS::StackName}-${AWS::Region}-AWSModel-S3
+       - PolicyDocument:
+           Statement:
+           - Action:
+             - ecr:*
+             Effect: Allow
+             Resource:
+             -  "*"
+           Version: '2012-10-17'
+         PolicyName: !Sub ${AWS::StackName}-${AWS::Region}-AWSModel-ECR
+       - PolicyDocument:
+           Statement:
+           - Action:
+             - ecs:*
+             Effect: Allow
+             Resource:
+             -  "*"
+           Version: '2012-10-17'
+         PolicyName: !Sub ${AWS::StackName}-${AWS::Region}-AWSModel-ECS
+       - PolicyDocument:
+           Statement:
+           - Action:
+             - ec2:*
+             Effect: Allow
+             Resource:
+             -  "*"
+           Version: '2012-10-17'
+         PolicyName: !Sub ${AWS::StackName}-${AWS::Region}-AWSModel-EC2
+       - PolicyDocument:
+           Statement:
+           - Action:
+             - sagemaker:*
+             Effect: Allow
+             Resource:
+             - !Sub arn:aws:sagemaker:::*
+           Version: '2012-10-17'
+         PolicyName: !Sub ${AWS::StackName}-${AWS::Region}-AWSModel-SageMaker
+       RoleName: !Sub ${AWS::StackName}-${AWS::Region}-SageMakerModelExecutionRole
+#lambda functions
+  InvokeTranscribe:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt InvokeTranscribeExecutionRole.Arn
+      Runtime: python3.9
+      MemorySize: 128
+      Timeout: 3
+      Environment:
+        Variables:
+          OUTPUT_BUCKET: !Ref TranscriptBucketName
+      Code:
+        ZipFile: |
+         import boto3
+         import uuid
+         import json
+         import os
+         def lambda_handler(event, context):
+           #call and name Event Notification Resources
+           record = event['Records'][0]
+           s3bucket = record['s3']['bucket']['name']
+           s3object = record['s3']['object']['key']
+           s3Path = "s3://" + s3bucket + "/" + s3object
+           jobName = str(uuid.uuid4()) + s3object
+           #begin the transcription job for script redaction
+           client = boto3.client('transcribe')
+           s3_client = boto3.client('s3')
+           #extract the mp3
+           try:
+             #redacted
+             client.start_transcription_job(
+               TranscriptionJobName=jobName,
+               LanguageCode='en-US',
+               MediaFormat='mp4',
+               Media={
+                 'MediaFileUri': s3Path
+               }
+               #,
+               #ContentRedaction = {
+                 # ‘RedactionType': 'PII',
+                 # ‘RedactionOutput': 'redacted'
+                 # select pii types to be redacted in a property named 'PiiEntityTypes', default is all
+               #}
+               ,
+               OutputBucketName = os.environ['OUTPUT_BUCKET']
+             )
+           except client.exceptions.BadRequestException as e:
+             print("error: " + str(e.response))
+  CallSummarization:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt SageMakerExecutionRole.Arn
+      Runtime: python3.9
+      MemorySize: 128
+      Timeout: 3
+      Environment:
+        Variables:
+          ENDPOINT_NAME: endpoint-name
+      Code:
+        ZipFile: |
+         import io
+         import boto3
+         import json
+         import os
+         import csv
+         import uuid 
+         # grab environment variables
+         sagemaker = boto3.client('sagemaker')
+         s3 = boto3.resource('s3')
+         runtime = boto3.client('sagemaker-runtime')
+         s3_client = boto3.client('s3')
+         #start lambda job
+         def lambda_handler(event, context):
+             #calling and naming all resources
+             record = event['Records'][0]
+             s3bucket = record['s3']['bucket']['name']
+             print(s3bucket)
+             s3object = record['s3']['object']['key']
+             print(s3object)
+             s3Path = "s3://" + s3bucket + "/" + s3object
+             jobName = 'sage-' + s3object
+             ENDPOINT_NAME = os.environ['ENDPOINT_NAME']
+             #isolating and naming file content 
+             obj = s3_client.get_object(Bucket=s3bucket, Key=s3object)
+             data = json.loads(obj['Body'].read().decode())
+             payload = { "inputs": data['results']['transcripts'][0]['transcript']}
+             try:
+                 response = runtime.invoke_endpoint(
+                     EndpointName=ENDPOINT_NAME, 
+                     Body=json.dumps(payload), 
+                     ContentType='application/json'
+                     )
+                 serialized_results = json.loads(response['Body'].read().decode())
+                 results = json.dumps(serialized_results)
+                 s3_client.put_object(Bucket='sagemaker-bart-output', Key=jobName, Body=results)
+             except runtime.exceptions.ModelError as e:
+                  print(e.response)
+#lambda permissions
+  InvokeTranscribeProcessingPermission:
+    Type: AWS::Lambda::Permission
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref InvokeTranscribe
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub 'arn:aws:s3:::*'
+      SourceAccount: !Ref AWS::AccountId  
+  CallSummarizationProcessingPermission:
+    Type: AWS::Lambda::Permission
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref CallSummarization
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub 'arn:aws:s3:::*'
+      SourceAccount: !Ref AWS::AccountId  
+#SageMaker Endpoint Config 
+  SageMakerModel:
+    Type: AWS::SageMaker::Model
+    Properties:
+      PrimaryContainer:
+        Image: 763104351884.dkr.ecr.us-west-2.amazonaws.com/pytorch-inference:1.12.0-cpu-py38-ubuntu20.04-sagemaker 
+# image resource found at https://github.com/aws/deep-learning-containers/blob/master/available_images.md
+        Mode: SingleModel
+        ModelDataUrl: !Sub s3://${NotebookBucket}/model.tar.gz
+      ExecutionRoleArn: !GetAtt SageMakerModelExecutionRole.Arn
+      VpcConfig: 
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+        Subnets:
+          - !Ref PrivateSubnet
+      ModelName: !Sub ${AWS::StackName}-model
+  SageMakerEndpointConfig:
+    Type: AWS::SageMaker::EndpointConfig
+    Properties:
+      EndpointConfigName: !Sub ${AWS::StackName}-endpoint-config-name
+      ProductionVariants:
+        - ModelName: !GetAtt SageMakerModel.ModelName
+          InitialInstanceCount: 2
+          InitialVariantWeight: 0.5
+          InstanceType: ml.m5.xlarge
+          VariantName: dev
+  SageMakerEndpoint:
+    Type: AWS::SageMaker::Endpoint
+    Properties:
+      EndpointName: !Sub ${AWS::StackName}-endpoint-name
+      EndpointConfigName: !GetAtt SageMakerEndpointConfig.EndpointConfigName
+  #buckets
+  InputBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    DependsOn:
+      - InvokeTranscribeProcessingPermission
+    Properties:
+      BucketName: !Ref InputBucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt InvokeTranscribe.Arn
+  TranscriptBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    DependsOn:
+      - CallSummarizationProcessingPermission
+    Properties:
+      BucketName: !Ref TranscriptBucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt CallSummarization.Arn
+  OutputBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref OutputBucketName 
+  ModelStorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "sagemaker-models-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
